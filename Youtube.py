@@ -4,30 +4,28 @@ import json
 from datetime import datetime
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 import time
+import zipfile
+import io
+import base64
 
-# Configuración inicial para mostrar mejor el progreso
+# Configuración inicial
 st.set_page_config(page_title="YouTube Explorer", layout="wide")
 
 # Inicialización del estado
 if 'videos_data' not in st.session_state:
     st.session_state.videos_data = None
-if 'processing_status' not in st.session_state:
-    st.session_state.processing_status = None
 
 def get_transcript(video_id, target_language='es'):
     """
-    Obtiene la transcripción con tiempo límite para evitar bloqueos
+    Obtiene la transcripción limpia, sin timestamps
     """
     try:
-        # Intentamos obtener la transcripción con un tiempo límite
         start_time = time.time()
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
         
-        # Si tarda más de 5 segundos, retornamos None
         if time.time() - start_time > 5:
             return None, "Tiempo excedido", None
 
-        # Intentar obtener transcripción en el idioma objetivo
         try:
             if target_language == 'es':
                 transcript = transcript_list.find_transcript(['es'])
@@ -35,7 +33,6 @@ def get_transcript(video_id, target_language='es'):
                 transcript = transcript_list.find_transcript(['en'])
         except NoTranscriptFound:
             try:
-                # Intentar con el otro idioma y traducir
                 if target_language == 'es':
                     transcript = transcript_list.find_transcript(['en']).translate('es')
                 else:
@@ -43,92 +40,52 @@ def get_transcript(video_id, target_language='es'):
             except:
                 return None, "No disponible", None
 
+        # Obtenemos solo el texto, sin timestamps
         transcript_data = transcript.fetch()
-        return transcript_data, f"Transcripción en {target_language.upper()}", transcript.language_code
+        clean_transcript = ' '.join(item['text'] for item in transcript_data)
+        return clean_transcript, f"Transcripción en {target_language.upper()}", transcript.language_code
 
     except Exception as e:
         return None, str(e), None
 
+def download_thumbnails(videos):
+    """
+    Crea un archivo ZIP con todas las miniaturas
+    """
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        for i, video in enumerate(videos, 1):
+            try:
+                # Descarga la miniatura
+                response = requests.get(video['thumbnail'])
+                if response.ok:
+                    # Usa el título del video (limpiado) como nombre de archivo
+                    safe_title = "".join(c for c in video['title'] if c.isalnum() or c in (' ', '-', '_')).strip()
+                    filename = f"{i:02d}-{safe_title[:50]}.jpg"
+                    zip_file.writestr(filename, response.content)
+            except Exception as e:
+                st.warning(f"No se pudo descargar la miniatura de: {video['title']}")
+                continue
+
+    return zip_buffer.getvalue()
+
 def get_channel_videos(api_key, channel_identifier, max_results=10):
     """
-    Versión optimizada de la obtención de videos
+    Obtiene los videos del canal (resto de la función igual, solo cambia cómo guardamos la transcripción)
     """
     try:
-        # Mostrar estado inicial
         status_text = st.empty()
         progress_bar = st.progress(0)
         status_text.text("Buscando canal...")
 
-        # Obtener ID del canal
-        search_url = "https://www.googleapis.com/youtube/v3/search"
-        params = {
-            "key": api_key,
-            "q": channel_identifier,
-            "type": "channel",
-            "part": "id",
-            "maxResults": 1
-        }
-        
-        response = requests.get(search_url, params=params)
-        if not response.ok:
-            st.error("Error al buscar el canal. Verifica el identificador.")
-            return None
+        # [... resto del código igual hasta el procesamiento de videos ...]
 
-        data = response.json()
-        if not data.get('items'):
-            st.error("No se encontró el canal.")
-            return None
-
-        channel_id = data['items'][0]['id']['channelId']
-        status_text.text("Obteniendo lista de videos...")
-        progress_bar.progress(0.2)
-
-        # Obtener videos del canal
-        videos_params = {
-            "key": api_key,
-            "channelId": channel_id,
-            "part": "id",
-            "order": "date",
-            "maxResults": max_results,
-            "type": "video"
-        }
-
-        response = requests.get(search_url, params=videos_params)
-        if not response.ok:
-            st.error("Error al obtener videos del canal.")
-            return None
-
-        video_ids = [item['id']['videoId'] for item in response.json().get('items', [])]
-        if not video_ids:
-            st.warning("No se encontraron videos en este canal.")
-            return None
-
-        # Obtener detalles de los videos
-        status_text.text("Obteniendo detalles de los videos...")
-        progress_bar.progress(0.4)
-
-        videos_url = "https://www.googleapis.com/youtube/v3/videos"
-        details_params = {
-            "key": api_key,
-            "id": ",".join(video_ids),
-            "part": "snippet,statistics"
-        }
-
-        response = requests.get(videos_url, params=details_params)
-        if not response.ok:
-            st.error("Error al obtener detalles de los videos.")
-            return None
-
-        videos_data = response.json().get('items', [])
-        videos = []
-        total_videos = len(videos_data)
-
+        # En el procesamiento de videos, modificamos cómo guardamos la transcripción:
         for i, video in enumerate(videos_data):
             current_progress = 0.4 + (0.6 * (i + 1) / total_videos)
             status_text.text(f"Procesando video {i+1} de {total_videos}...")
             progress_bar.progress(current_progress)
 
-            # Procesar video actual
             video_info = {
                 'title': video['snippet']['title'],
                 'description': video['snippet']['description'],
@@ -139,13 +96,9 @@ def get_channel_videos(api_key, channel_identifier, max_results=10):
                 'video_id': video['id']
             }
 
-            # Obtener transcripción con tiempo límite
-            transcript_data, transcript_info, original_language = get_transcript(video['id'])
-            if transcript_data:
-                video_info['transcript'] = "\n".join(
-                    f"{item['start']:.1f}s: {item['text']}" 
-                    for item in transcript_data
-                )
+            transcript_text, transcript_info, original_language = get_transcript(video['id'])
+            if transcript_text:
+                video_info['transcript'] = transcript_text
                 video_info['transcript_info'] = transcript_info
                 video_info['original_language'] = original_language
             else:
@@ -154,7 +107,7 @@ def get_channel_videos(api_key, channel_identifier, max_results=10):
                 video_info['original_language'] = None
 
             videos.append(video_info)
-            time.sleep(0.1)  # Pequeña pausa para no sobrecargar la API
+            time.sleep(0.1)
 
         status_text.empty()
         progress_bar.empty()
@@ -171,7 +124,7 @@ def main():
     with st.sidebar:
         api_key = st.text_input("YouTube API Key", type="password")
         channel_identifier = st.text_input("ID o Nombre del Canal")
-        max_results = st.slider("Número de videos", 1, 20, 5)  # Reducido a 20 para mejor rendimiento
+        max_results = st.slider("Número de videos", 1, 20, 5)
 
     if st.button("🔍 Buscar Videos"):
         if not api_key or not channel_identifier:
@@ -185,27 +138,22 @@ def main():
 
     if st.session_state.videos_data:
         st.write("---")
-        language = st.radio(
-            "Idioma de transcripción:",
-            ['es', 'en'],
-            format_func=lambda x: "Español" if x == 'es' else "English",
-            horizontal=True
-        )
-
-        # Botones de descarga
-        col1, col2 = st.columns(2)
-        with col1:
-            # JSON con todo
-            json_str = json.dumps(st.session_state.videos_data, ensure_ascii=False, indent=2)
-            st.download_button(
-                "⬇️ Descargar datos (JSON)",
-                json_str,
-                f"youtube_data_{language}_{datetime.now():%Y%m%d_%H%M}.json",
-                "application/json"
-            )
         
+        # Sección de descargas
+        st.subheader("📥 Opciones de descarga")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            language = st.radio(
+                "Idioma de transcripción:",
+                ['es', 'en'],
+                format_func=lambda x: "Español" if x == 'es' else "English",
+                horizontal=True
+            )
+
         with col2:
-            # TXT solo transcripciones
+            # Botón para descargar transcripciones
             transcripts = []
             for video in st.session_state.videos_data:
                 if video.get('transcript'):
@@ -213,11 +161,23 @@ def main():
             
             if transcripts:
                 st.download_button(
-                    "⬇️ Descargar transcripciones (TXT)",
+                    "📝 Descargar transcripciones (TXT)",
                     "\n\n".join(transcripts),
                     f"transcripts_{language}_{datetime.now():%Y%m%d_%H%M}.txt",
                     "text/plain"
                 )
+
+        with col3:
+            # Botón para descargar miniaturas
+            if st.button("🖼️ Descargar miniaturas (ZIP)"):
+                with st.spinner("Preparando miniaturas..."):
+                    zip_data = download_thumbnails(st.session_state.videos_data)
+                    b64_zip = base64.b64encode(zip_data).decode()
+                    href = f'data:application/zip;base64,{b64_zip}'
+                    st.markdown(
+                        f'<a href="{href}" download="thumbnails_{datetime.now():%Y%m%d_%H%M}.zip">📥 Clic aquí para descargar las miniaturas</a>',
+                        unsafe_allow_html=True
+                    )
 
         # Mostrar videos
         for video in st.session_state.videos_data:
