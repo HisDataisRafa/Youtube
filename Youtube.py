@@ -1,148 +1,110 @@
 import streamlit as st
-from googleapiclient.discovery import build
-from youtube_transcript_api import YouTubeTranscriptApi
-import pandas as pd
 import requests
-import os
 import json
+from datetime import datetime
 
-class YouTubeExtractor:
-    def __init__(self, api_key):
-        """
-        Esta clase maneja toda la lógica de extracción de YouTube.
-        Inicializa la conexión con la API de YouTube usando tu clave API.
-        """
-        self.youtube = build('youtube', 'v3', developerKey=api_key)
+def get_channel_videos(api_key, channel_id, max_results=10):
+    """
+    Obtiene videos de un canal de YouTube usando solo requests
+    """
+    # Primero obtenemos el ID de los videos del canal
+    search_url = "https://www.googleapis.com/youtube/v3/search"
+    search_params = {
+        "key": api_key,
+        "channelId": channel_id,
+        "part": "id",
+        "order": "date",
+        "maxResults": max_results,
+        "type": "video"
+    }
+    
+    try:
+        response = requests.get(search_url, params=search_params)
+        response.raise_for_status()  # Verificar si hay errores
+        search_data = response.json()
         
-        # Creamos directorios temporales para almacenar contenido
-        self.temp_dir = 'temp_content'
-        if not os.path.exists(self.temp_dir):
-            os.makedirs(self.temp_dir)
-
-    def get_channel_videos(self, channel_id, max_results=10):
-        """
-        Obtiene los videos más recientes de un canal y sus transcripciones
-        """
-        try:
-            # Buscamos los videos del canal
-            request = self.youtube.search().list(
-                part="id",
-                channelId=channel_id,
-                maxResults=max_results,
-                type="video",
-                order="date"
-            )
-            
-            response = request.execute()
-            videos_data = []
-            
-            # Procesamos cada video encontrado
-            for item in response['items']:
-                video_id = item['id']['videoId']
-                video_data = self._get_video_details(video_id)
-                if video_data:
-                    videos_data.append(video_data)
-            
-            return videos_data
-            
-        except Exception as e:
-            st.error(f"Error al obtener videos: {str(e)}")
-            return None
-
-    def _get_video_details(self, video_id):
-        """
-        Obtiene los detalles completos de un video específico
-        """
-        try:
-            request = self.youtube.videos().list(
-                part="snippet,statistics",
-                id=video_id
-            )
-            response = request.execute()
-            
-            if not response['items']:
-                return None
-                
-            video = response['items'][0]
-            
-            # Intentamos obtener la transcripción
-            try:
-                transcript = YouTubeTranscriptApi.get_transcript(video_id)
-                transcript_text = "\n".join([entry['text'] for entry in transcript])
-            except:
-                transcript_text = "Transcripción no disponible"
-            
-            return {
+        # Extraer IDs de videos
+        video_ids = [item['id']['videoId'] for item in search_data.get('items', [])]
+        
+        # Obtener detalles de los videos
+        videos_url = "https://www.googleapis.com/youtube/v3/videos"
+        videos_params = {
+            "key": api_key,
+            "id": ",".join(video_ids),
+            "part": "snippet,statistics"
+        }
+        
+        response = requests.get(videos_url, params=videos_params)
+        response.raise_for_status()
+        videos_data = response.json()
+        
+        # Procesar y retornar la información relevante
+        videos = []
+        for video in videos_data.get('items', []):
+            videos.append({
                 'title': video['snippet']['title'],
                 'description': video['snippet']['description'],
-                'thumbnail_url': video['snippet']['thumbnails']['high']['url'],
+                'thumbnail': video['snippet']['thumbnails']['high']['url'],
                 'views': video['statistics'].get('viewCount', '0'),
-                'likes': video['statistics'].get('likeCount', '0'),
-                'transcript': transcript_text
-            }
-            
-        except Exception as e:
-            st.error(f"Error al obtener detalles del video: {str(e)}")
-            return None
+                'likes': video['statistics'].get('likeCount', '0')
+            })
+        
+        return videos
+        
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error al obtener videos: {str(e)}")
+        return None
 
 def main():
-    st.set_page_config(page_title="YouTube Content Extractor", layout="wide")
+    st.title("📺 YouTube Channel Explorer")
+    st.write("Explora los videos más recientes de un canal de YouTube")
     
-    st.title("📺 YouTube Content Extractor")
-    st.write("Herramienta para extraer contenido de canales de YouTube incluyendo transcripciones")
+    # Configuración en la barra lateral
+    st.sidebar.header("Configuración")
+    api_key = st.sidebar.text_input("YouTube API Key", type="password")
+    channel_id = st.sidebar.text_input("ID del Canal")
+    max_results = st.sidebar.slider("Número de videos", 1, 50, 10)
     
-    # Input para la API Key
-    api_key = st.text_input("Ingresa tu API Key de YouTube:", type="password")
-    
-    # Input para el ID del canal
-    channel_id = st.text_input("Ingresa el ID del canal de YouTube:")
-    
-    # Selector para número de videos
-    max_videos = st.slider("Número de videos a extraer", 1, 50, 10)
-    
-    if st.button("Extraer Contenido"):
+    if st.button("Obtener Videos"):
         if not api_key or not channel_id:
-            st.error("Por favor proporciona tanto la API Key como el ID del canal")
+            st.warning("Por favor ingresa la API key y el ID del canal.")
             return
             
-        try:
-            with st.spinner("Extrayendo contenido..."):
-                extractor = YouTubeExtractor(api_key)
-                videos = extractor.get_channel_videos(channel_id, max_videos)
+        with st.spinner("Obteniendo videos..."):
+            videos = get_channel_videos(api_key, channel_id, max_results)
+            
+        if videos:
+            # Guardar datos para descarga
+            df_data = []
+            for video in videos:
+                df_data.append({
+                    'Título': video['title'],
+                    'Vistas': video['views'],
+                    'Likes': video['likes']
+                })
                 
-            if videos:
-                st.success(f"¡Se extrajeron {len(videos)} videos exitosamente!")
+            # Mostrar videos
+            for video in videos:
+                st.write("---")
+                col1, col2 = st.columns([1, 2])
                 
-                # Crear un DataFrame para descargar
-                df = pd.DataFrame(videos)
+                with col1:
+                    st.image(video['thumbnail'])
                 
-                # Botón para descargar como CSV
-                csv = df.to_csv(index=False)
-                st.download_button(
-                    label="Descargar datos como CSV",
-                    data=csv,
-                    file_name="youtube_data.csv",
-                    mime="text/csv"
-                )
-                
-                # Mostrar los videos
-                for video in videos:
-                    st.write("---")
-                    col1, col2 = st.columns([1, 2])
-                    
-                    with col1:
-                        st.image(video['thumbnail_url'])
-                    
-                    with col2:
-                        st.write(f"### {video['title']}")
-                        st.write(f"👁️ Views: {video['views']}  |  👍 Likes: {video['likes']}")
-                        with st.expander("Ver descripción"):
-                            st.write(video['description'])
-                        with st.expander("Ver transcripción"):
-                            st.write(video['transcript'])
-        
-        except Exception as e:
-            st.error(f"Ocurrió un error: {str(e)}")
+                with col2:
+                    st.write(f"### {video['title']}")
+                    st.write(f"👁️ Vistas: {video['views']}  |  👍 Likes: {video['likes']}")
+                    with st.expander("Ver descripción"):
+                        st.write(video['description'])
+            
+            # Botón de descarga
+            json_str = json.dumps(videos, ensure_ascii=False, indent=2)
+            st.download_button(
+                label="⬇️ Descargar datos (JSON)",
+                data=json_str,
+                file_name=f"youtube_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                mime="application/json"
+            )
 
 if __name__ == "__main__":
     main()
