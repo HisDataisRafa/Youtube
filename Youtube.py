@@ -44,7 +44,9 @@ def get_transcript(video_id, target_language='es'):
                 return None, "No disponible", None
 
         transcript_data = transcript.fetch()
-        return transcript_data, f"Transcripción en {target_language.upper()}", transcript.language_code
+        # Unimos solo el texto, sin timestamps
+        clean_text = ' '.join(item['text'] for item in transcript_data)
+        return clean_text, f"Transcripción en {target_language.upper()}", transcript.language_code
 
     except Exception as e:
         return None, str(e), None
@@ -142,10 +144,7 @@ def get_channel_videos(api_key, channel_identifier, max_results=10):
             # Obtener transcripción con tiempo límite
             transcript_data, transcript_info, original_language = get_transcript(video['id'])
             if transcript_data:
-                video_info['transcript'] = "\n".join(
-                    f"{item['start']:.1f}s: {item['text']}" 
-                    for item in transcript_data
-                )
+                video_info['transcript'] = transcript_data  # Ahora transcript_data ya es texto limpio
                 video_info['transcript_info'] = transcript_info
                 video_info['original_language'] = original_language
             else:
