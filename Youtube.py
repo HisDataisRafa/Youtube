@@ -1,31 +1,44 @@
-import streamlit as st
-import requests
-from youtube_transcript_api import YouTubeTranscriptApi
-import time
-
-# Configuración inicial de la página
-st.set_page_config(page_title="YouTube Explorer", layout="wide")
-
-def get_video_transcript(video_id):
+def get_channel_videos(api_key, channel_identifier, max_results=10):
     """
-    Función simplificada para obtener transcripciones.
-    Solo intenta obtener la transcripción una vez, sin traducciones.
+    Obtiene los videos del canal y sus detalles incluyendo transcripciones.
+    La función maneja todo el proceso de manera ordenada:
+    1. Busca el canal
+    2. Obtiene la lista de videos
+    3. Obtiene los detalles de cada video
+    4. Procesa las transcripciones
     """
     try:
-        transcript = YouTubeTranscriptApi.get_transcript(video_id)
-        return ' '.join(item['text'] for item in transcript)
-    except:
-        return None
+        # Inicializamos elementos visuales para mostrar el progreso
+        status_text = st.empty()
+        progress_bar = st.progress(0)
+        status_text.text("Buscando canal...")
 
-def get_videos(api_key, channel_id, max_results=5):
-    """
-    Función simplificada para obtener videos.
-    Solo obtiene información básica y transcripción.
-    """
-    try:
-        # Paso 1: Obtener IDs de los videos
-        search_url = f"https://www.googleapis.com/youtube/v3/search"
+        # Paso 1: Obtener ID del canal
+        search_url = "https://www.googleapis.com/youtube/v3/search"
         params = {
+            "key": api_key,
+            "q": channel_identifier,
+            "type": "channel",
+            "part": "id",
+            "maxResults": 1
+        }
+        
+        response = requests.get(search_url, params=params)
+        if not response.ok:
+            st.error("Error al buscar el canal. Verifica el identificador.")
+            return None
+
+        data = response.json()
+        if not data.get('items'):
+            st.error("No se encontró el canal.")
+            return None
+
+        channel_id = data['items'][0]['id']['channelId']
+        status_text.text("Obteniendo lista de videos...")
+        progress_bar.progress(0.2)
+
+        # Paso 2: Obtener lista de videos del canal
+        videos_params = {
             "key": api_key,
             "channelId": channel_id,
             "part": "id",
@@ -33,84 +46,76 @@ def get_videos(api_key, channel_id, max_results=5):
             "maxResults": max_results,
             "type": "video"
         }
-        
-        with st.spinner("Buscando videos..."):
-            response = requests.get(search_url, params=params)
-            if not response.ok:
-                st.error("Error al buscar videos")
-                return None
-                
-            data = response.json()
-            video_ids = [item['id']['videoId'] for item in data.get('items', [])]
 
-        # Paso 2: Obtener detalles de los videos
-        if video_ids:
-            videos_url = "https://www.googleapis.com/youtube/v3/videos"
-            params = {
-                "key": api_key,
-                "id": ",".join(video_ids),
-                "part": "snippet,statistics"
+        response = requests.get(search_url, params=videos_params)
+        if not response.ok:
+            st.error("Error al obtener videos del canal.")
+            return None
+
+        video_ids = [item['id']['videoId'] for item in response.json().get('items', [])]
+        if not video_ids:
+            st.warning("No se encontraron videos en este canal.")
+            return None
+
+        # Paso 3: Obtener detalles completos de cada video
+        status_text.text("Obteniendo detalles de los videos...")
+        progress_bar.progress(0.4)
+
+        videos_url = "https://www.googleapis.com/youtube/v3/videos"
+        details_params = {
+            "key": api_key,
+            "id": ",".join(video_ids),
+            "part": "snippet,statistics"
+        }
+
+        response = requests.get(videos_url, params=details_params)
+        if not response.ok:
+            st.error("Error al obtener detalles de los videos.")
+            return None
+
+        # Aquí es donde estaba el error - Ahora definimos videos_data correctamente
+        videos_data = response.json().get('items', [])
+        
+        # Paso 4: Procesar cada video y obtener transcripciones
+        videos = []  # Lista para almacenar todos los videos procesados
+        total_videos = len(videos_data)
+
+        for i, video in enumerate(videos_data):
+            current_progress = 0.4 + (0.6 * (i + 1) / total_videos)
+            status_text.text(f"Procesando video {i+1} de {total_videos}...")
+            progress_bar.progress(current_progress)
+
+            # Recopilamos la información básica del video
+            video_info = {
+                'title': video['snippet']['title'],
+                'description': video['snippet']['description'],
+                'thumbnail': video['snippet']['thumbnails']['high']['url'],
+                'views': video['statistics'].get('viewCount', '0'),
+                'likes': video['statistics'].get('likeCount', '0'),
+                'url': f"https://youtube.com/watch?v={video['id']}",
+                'video_id': video['id']
             }
-            
-            with st.spinner("Obteniendo detalles..."):
-                response = requests.get(videos_url, params=params)
-                if not response.ok:
-                    st.error("Error al obtener detalles")
-                    return None
-                    
-                videos = []
-                for video in response.json().get('items', []):
-                    videos.append({
-                        'title': video['snippet']['title'],
-                        'thumbnail': video['snippet']['thumbnails']['high']['url'],
-                        'video_id': video['id'],
-                        'url': f"https://youtube.com/watch?v={video['id']}"
-                    })
-                    
-                return videos
-        return None
-            
-    except Exception as e:
-        st.error(f"Error: {str(e)}")
-        return None
 
-def main():
-    st.title("📺 YouTube Content Explorer")
-    st.write("Versión simplificada para diagnóstico")
-    
-    # Entradas del usuario
-    api_key = st.text_input("YouTube API Key", type="password")
-    channel_id = st.text_input("ID del Canal")
-    
-    if st.button("Buscar"):
-        if not api_key or not channel_id:
-            st.warning("Por favor ingresa la API key y el ID del canal")
-            return
-            
-        # Intentar obtener los videos
-        videos = get_videos(api_key, channel_id, max_results=5)
+            # Obtenemos y procesamos la transcripción
+            transcript_text, transcript_info, original_language = get_transcript(video['id'])
+            if transcript_text:
+                video_info['transcript'] = transcript_text
+                video_info['transcript_info'] = transcript_info
+                video_info['original_language'] = original_language
+            else:
+                video_info['transcript'] = ""
+                video_info['transcript_info'] = transcript_info
+                video_info['original_language'] = None
+
+            videos.append(video_info)
+            time.sleep(0.1)  # Pequeña pausa para no sobrecargar la API
+
+        # Limpiamos los elementos visuales de progreso
+        status_text.empty()
+        progress_bar.empty()
         
-        if videos:
-            st.success(f"Se encontraron {len(videos)} videos")
-            
-            # Mostrar videos
-            for video in videos:
-                st.write("---")
-                col1, col2 = st.columns([1, 2])
-                
-                with col1:
-                    st.image(video['thumbnail'])
-                
-                with col2:
-                    st.markdown(f"### [{video['title']}]({video['url']})")
-                    
-                    # Obtener transcripción
-                    with st.spinner(f"Obteniendo transcripción para {video['title']}..."):
-                        transcript = get_video_transcript(video['video_id'])
-                        if transcript:
-                            st.text_area("Transcripción:", transcript, height=150)
-                        else:
-                            st.info("No hay transcripción disponible")
+        return videos
 
-if __name__ == "__main__":
-    main()
+    except Exception as e:
+        st.error(f"Error inesperado: {str(e)}")
+        return None
