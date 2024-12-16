@@ -4,8 +4,10 @@ import json
 from datetime import datetime
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 import time
+import io
+import zipfile
 
-# Configuración inicial para mostrar mejor el progreso
+# Configuración inicial
 st.set_page_config(page_title="YouTube Explorer", layout="wide")
 
 # Inicialización del estado
@@ -16,98 +18,77 @@ if 'processing_status' not in st.session_state:
 
 def get_transcript(video_id, target_language='es'):
     """
-    Obtiene la transcripción intentando múltiples métodos y fuentes
+    Obtiene la transcripción con múltiples intentos y mejor manejo de errores
     """
     try:
-        # Lista de idiomas a intentar para español
-        spanish_langs = ['es', 'es-ES', 'es-419', 'es-MX', 'es-AR', 'es-US']
-        # Lista de idiomas a intentar para inglés
-        english_langs = ['en', 'en-US', 'en-GB', 'en-CA', 'en-IN']
-        
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-        transcript = None
-        
-        # Paso 1: Intentar obtener transcripción manual en el idioma objetivo
+        # Intentar primero el método más directo
         try:
-            if target_language == 'es':
-                for lang in spanish_langs:
-                    try:
-                        transcript = transcript_list.find_manually_created_transcript([lang])
-                        break
-                    except:
-                        continue
-            else:
-                for lang in english_langs:
-                    try:
-                        transcript = transcript_list.find_manually_created_transcript([lang])
-                        break
-                    except:
-                        continue
-        except:
-            pass
+            direct_transcript = YouTubeTranscriptApi.get_transcript(video_id)
+            clean_text = ' '.join(item['text'] for item in direct_transcript)
+            return clean_text, "Transcripción directa", "direct"
+        except Exception as e:
+            st.write(f"Intento directo fallido para {video_id}, probando métodos alternativos...")
 
-        # Paso 2: Si no hay manual, intentar transcripción automática en el idioma objetivo
-        if not transcript:
-            try:
-                if target_language == 'es':
-                    for lang in spanish_langs:
-                        try:
-                            transcript = transcript_list.find_generated_transcript([lang])
-                            break
-                        except:
-                            continue
-                else:
-                    for lang in english_langs:
-                        try:
-                            transcript = transcript_list.find_generated_transcript([lang])
-                            break
-                        except:
-                            continue
-            except:
-                pass
+        # Si falla el método directo, intentar con la lista de transcripciones
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        
+        # Obtener todas las transcripciones disponibles
+        available_transcripts = []
+        
+        # Recopilar transcripciones manuales
+        try:
+            manual_transcripts = transcript_list.manual_transcripts
+            available_transcripts.extend(list(manual_transcripts.values()))
+        except Exception as e:
+            st.write(f"No se encontraron transcripciones manuales para {video_id}")
+        
+        # Recopilar transcripciones automáticas
+        try:
+            auto_transcripts = transcript_list.generated_transcripts
+            available_transcripts.extend(list(auto_transcripts.values()))
+        except Exception as e:
+            st.write(f"No se encontraron transcripciones automáticas para {video_id}")
 
-        # Paso 3: Intentar obtener cualquier transcripción manual y traducir
-        if not transcript:
-            try:
-                available_transcripts = transcript_list.manual_transcripts
-                if available_transcripts:
-                    first_transcript = list(available_transcripts.values())[0]
-                    transcript = first_transcript.translate(target_language)
-            except:
-                pass
+        # Si tenemos transcripciones disponibles
+        if available_transcripts:
+            for transcript in available_transcripts:
+                try:
+                    # Si está en el idioma objetivo, usarla directamente
+                    if transcript.language_code.startswith(target_language):
+                        transcript_data = transcript.fetch()
+                        clean_text = ' '.join(item['text'] for item in transcript_data)
+                        info = "Automática" if transcript.is_generated else "Manual"
+                        return clean_text, f"Transcripción {info} en {transcript.language_code}", transcript.language_code
+                    
+                    # Si no está en el idioma objetivo, intentar traducir
+                    else:
+                        translated = transcript.translate(target_language)
+                        transcript_data = translated.fetch()
+                        clean_text = ' '.join(item['text'] for item in transcript_data)
+                        info = "Automática" if transcript.is_generated else "Manual"
+                        return clean_text, f"Transcripción {info} traducida de {transcript.language_code}", target_language
+                except Exception as e:
+                    continue
 
-        # Paso 4: Como último recurso, intentar cualquier transcripción automática y traducir
-        if not transcript:
-            try:
-                available_transcripts = transcript_list.generated_transcripts
-                if available_transcripts:
-                    first_transcript = list(available_transcripts.values())[0]
-                    transcript = first_transcript.translate(target_language)
-            except:
-                pass
+        # Si llegamos aquí, intentar un último método
+        try:
+            fallback_transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=[target_language, 'en'])
+            clean_text = ' '.join(item['text'] for item in fallback_transcript)
+            return clean_text, "Transcripción de respaldo", "fallback"
+        except Exception as e:
+            st.write(f"Método de respaldo fallido para {video_id}")
 
-        # Si encontramos alguna transcripción, procesarla
-        if transcript:
-            transcript_data = transcript.fetch()
-            clean_text = ' '.join(item['text'] for item in transcript_data)
-            transcript_info = f"Transcripción en {target_language.upper()}"
-            if transcript.is_generated:
-                transcript_info += " (Automática)"
-            if transcript.language_code != target_language:
-                transcript_info += f" (Traducida de {transcript.language_code})"
-            return clean_text, transcript_info, transcript.language_code
-
-        return None, "No se encontró transcripción", None
+        return None, "No se encontró transcripción después de intentar todos los métodos", None
 
     except Exception as e:
-        return None, str(e), None
+        st.write(f"Error al procesar transcripción para {video_id}: {str(e)}")
+        return None, f"Error: {str(e)}", None
 
 def get_channel_videos(api_key, channel_identifier, max_results=10):
     """
-    Versión optimizada de la obtención de videos
+    Obtiene los videos del canal y sus detalles
     """
     try:
-        # Mostrar estado inicial
         status_text = st.empty()
         progress_bar = st.progress(0)
         status_text.text("Buscando canal...")
@@ -195,7 +176,7 @@ def get_channel_videos(api_key, channel_identifier, max_results=10):
             # Obtener transcripción con tiempo límite
             transcript_data, transcript_info, original_language = get_transcript(video['id'])
             if transcript_data:
-                video_info['transcript'] = transcript_data  # Ahora transcript_data ya es texto limpio
+                video_info['transcript'] = transcript_data
                 video_info['transcript_info'] = transcript_info
                 video_info['original_language'] = original_language
             else:
@@ -204,7 +185,7 @@ def get_channel_videos(api_key, channel_identifier, max_results=10):
                 video_info['original_language'] = None
 
             videos.append(video_info)
-            time.sleep(0.1)  # Pequeña pausa para no sobrecargar la API
+            time.sleep(1)  # Pausa más larga para dar tiempo a la API de transcripciones
 
         status_text.empty()
         progress_bar.empty()
@@ -218,17 +199,12 @@ def download_thumbnails(videos):
     """
     Crea un archivo ZIP con todas las miniaturas
     """
-    import io
-    import zipfile
-    
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
         for i, video in enumerate(videos, 1):
             try:
-                # Descarga la miniatura
                 response = requests.get(video['thumbnail'])
                 if response.ok:
-                    # Usa el título del video (limpiado) como nombre de archivo
                     safe_title = "".join(c for c in video['title'] if c.isalnum() or c in (' ', '-', '_')).strip()
                     filename = f"{i:02d}-{safe_title[:50]}.jpg"
                     zip_file.writestr(filename, response.content)
@@ -245,7 +221,7 @@ def main():
     with st.sidebar:
         api_key = st.text_input("YouTube API Key", type="password")
         channel_identifier = st.text_input("ID o Nombre del Canal")
-        max_results = st.slider("Número de videos", 1, 20, 5)  # Reducido a 20 para mejor rendimiento
+        max_results = st.slider("Número de videos", 1, 20, 5)
 
     if st.button("🔍 Buscar Videos"):
         if not api_key or not channel_identifier:
@@ -266,11 +242,10 @@ def main():
             horizontal=True
         )
 
-        # Botones de descarga
+        # Sección de descargas
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            # JSON con todo
             json_str = json.dumps(st.session_state.videos_data, ensure_ascii=False, indent=2)
             st.download_button(
                 "⬇️ Descargar datos (JSON)",
@@ -280,7 +255,6 @@ def main():
             )
         
         with col2:
-            # TXT solo transcripciones
             transcripts = []
             for video in st.session_state.videos_data:
                 if video.get('transcript'):
@@ -295,7 +269,6 @@ def main():
                 )
         
         with col3:
-            # Botón para descargar miniaturas
             if st.button("🖼️ Descargar miniaturas"):
                 with st.spinner("Preparando miniaturas..."):
                     zip_data = download_thumbnails(st.session_state.videos_data)
