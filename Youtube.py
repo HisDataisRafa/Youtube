@@ -13,76 +13,75 @@ st.set_page_config(page_title="YouTube Explorer", layout="wide")
 # Inicialización del estado
 if 'videos_data' not in st.session_state:
     st.session_state.videos_data = None
-if 'processing_status' not in st.session_state:
-    st.session_state.processing_status = None
 
 def get_transcript(video_id, target_language='es'):
     """
-    Obtiene la transcripción con múltiples intentos y mejor manejo de errores
+    Obtiene transcripciones tanto de videos normales como de Shorts
+    usando múltiples métodos
     """
-    try:
-        # Intentar primero el método más directo
+    def try_downsub_method(video_id):
+        """
+        Intenta obtener la transcripción usando el método de downsub
+        """
         try:
-            direct_transcript = YouTubeTranscriptApi.get_transcript(video_id)
-            clean_text = ' '.join(item['text'] for item in direct_transcript)
-            return clean_text, "Transcripción directa", "direct"
-        except Exception as e:
-            st.write(f"Intento directo fallido para {video_id}, probando métodos alternativos...")
-
-        # Si falla el método directo, intentar con la lista de transcripciones
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-        
-        # Obtener todas las transcripciones disponibles
-        available_transcripts = []
-        
-        # Recopilar transcripciones manuales
-        try:
-            manual_transcripts = transcript_list.manual_transcripts
-            available_transcripts.extend(list(manual_transcripts.values()))
-        except Exception as e:
-            st.write(f"No se encontraron transcripciones manuales para {video_id}")
-        
-        # Recopilar transcripciones automáticas
-        try:
-            auto_transcripts = transcript_list.generated_transcripts
-            available_transcripts.extend(list(auto_transcripts.values()))
-        except Exception as e:
-            st.write(f"No se encontraron transcripciones automáticas para {video_id}")
-
-        # Si tenemos transcripciones disponibles
-        if available_transcripts:
-            for transcript in available_transcripts:
-                try:
-                    # Si está en el idioma objetivo, usarla directamente
-                    if transcript.language_code.startswith(target_language):
-                        transcript_data = transcript.fetch()
-                        clean_text = ' '.join(item['text'] for item in transcript_data)
-                        info = "Automática" if transcript.is_generated else "Manual"
-                        return clean_text, f"Transcripción {info} en {transcript.language_code}", transcript.language_code
+            # Primera llamada para obtener la lista de subtítulos disponibles
+            url = f"https://yt.lemnoslife.com/videos?part=captions&id={video_id}"
+            response = requests.get(url)
+            data = response.json()
+            
+            if 'items' in data and data['items']:
+                captions = data['items'][0].get('captions', {})
+                if captions:
+                    # Intentar primero obtener subtítulos en español
+                    es_caption = None
+                    en_caption = None
                     
-                    # Si no está en el idioma objetivo, intentar traducir
-                    else:
-                        translated = transcript.translate(target_language)
-                        transcript_data = translated.fetch()
-                        clean_text = ' '.join(item['text'] for item in transcript_data)
-                        info = "Automática" if transcript.is_generated else "Manual"
-                        return clean_text, f"Transcripción {info} traducida de {transcript.language_code}", target_language
-                except Exception as e:
-                    continue
-
-        # Si llegamos aquí, intentar un último método
-        try:
-            fallback_transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=[target_language, 'en'])
-            clean_text = ' '.join(item['text'] for item in fallback_transcript)
-            return clean_text, "Transcripción de respaldo", "fallback"
+                    # Buscar subtítulos en español o inglés
+                    for caption in captions['items']:
+                        if caption['language'] == 'es':
+                            es_caption = caption
+                            break
+                        elif caption['language'] == 'en':
+                            en_caption = caption
+                    
+                    caption_to_use = es_caption or en_caption
+                    if caption_to_use:
+                        # Obtener el texto del subtítulo
+                        base_url = caption_to_use['baseUrl']
+                        response = requests.get(base_url)
+                        if response.ok:
+                            captions_text = response.text
+                            # Procesar el texto para obtener solo el contenido
+                            clean_text = ' '.join(line.strip() for line in captions_text.splitlines() if line.strip())
+                            return clean_text, f"Transcripción en {caption_to_use['language'].upper()}"
+            
+            return None, "No se encontraron subtítulos"
         except Exception as e:
-            st.write(f"Método de respaldo fallido para {video_id}")
+            st.write(f"Error en método alternativo: {str(e)}")
+            return None, "Error al obtener subtítulos"
 
-        return None, "No se encontró transcripción después de intentar todos los métodos", None
+    # Primer intento: Método YouTube Transcript API
+    try:
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        preferred_languages = ['es', 'es-ES', 'es-419', 'es-MX', 'es-AR', 'es-US', 'en', 'en-US']
+        
+        for lang in preferred_languages:
+            try:
+                transcript = transcript_list.find_transcript([lang])
+                transcript_data = transcript.fetch()
+                clean_text = ' '.join(item['text'] for item in transcript_data)
+                return clean_text, f"Transcripción en {lang.upper()}"
+            except:
+                continue
+    except:
+        st.write(f"Método principal falló para {video_id}, intentando método alternativo...")
 
-    except Exception as e:
-        st.write(f"Error al procesar transcripción para {video_id}: {str(e)}")
-        return None, f"Error: {str(e)}", None
+    # Segundo intento: Método Alternativo
+    text, info = try_downsub_method(video_id)
+    if text:
+        return text, info
+
+    return None, "No se encontró transcripción"
 
 def get_channel_videos(api_key, channel_identifier, max_results=10):
     """
@@ -173,19 +172,17 @@ def get_channel_videos(api_key, channel_identifier, max_results=10):
                 'video_id': video['id']
             }
 
-            # Obtener transcripción con tiempo límite
-            transcript_data, transcript_info, original_language = get_transcript(video['id'])
-            if transcript_data:
-                video_info['transcript'] = transcript_data
+            # Obtener transcripción
+            transcript_text, transcript_info = get_transcript(video['id'])
+            if transcript_text:
+                video_info['transcript'] = transcript_text
                 video_info['transcript_info'] = transcript_info
-                video_info['original_language'] = original_language
             else:
                 video_info['transcript'] = ""
                 video_info['transcript_info'] = transcript_info
-                video_info['original_language'] = None
 
             videos.append(video_info)
-            time.sleep(1)  # Pausa más larga para dar tiempo a la API de transcripciones
+            time.sleep(0.5)  # Pausa entre videos
 
         status_text.empty()
         progress_bar.empty()
@@ -216,12 +213,12 @@ def download_thumbnails(videos):
 
 def main():
     st.title("📺 YouTube Content Explorer")
-    st.write("Explora videos y transcripciones de canales de YouTube")
+    st.write("Explora videos y transcripciones de canales de YouTube (incluyendo Shorts)")
 
     with st.sidebar:
         api_key = st.text_input("YouTube API Key", type="password")
         channel_identifier = st.text_input("ID o Nombre del Canal")
-        max_results = st.slider("Número de videos", 1, 20, 5)
+        max_results = st.slider("Número de videos", 1, 50, 10)
 
     if st.button("🔍 Buscar Videos"):
         if not api_key or not channel_identifier:
