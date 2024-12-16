@@ -1,3 +1,4 @@
 streamlit==1.31.1
 requests==2.31.0
-youtube-transcript-api==0.6.1
+youtube-transcript_api==0.6.1
+beautifulsoup4==4.12.2
